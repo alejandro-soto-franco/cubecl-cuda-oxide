@@ -1,93 +1,63 @@
 # cubecl-cuda-oxide
 
-A [CubeCL](https://github.com/tracel-ai/cubecl) compiler backend that lowers
-kernel definitions to PTX through the
-[cuda-oxide](../cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. The result
-is a pure-Rust GPU JIT: no C++ compiler, no nvrtc, no CUDA SDK headers at
-build time.
+A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVlabs/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT: no C++ compiler, no nvrtc, no CUDA SDK headers at build time.
 
-## What it does
+## Status (M1)
 
-CubeCL's `Compiler` trait accepts a `KernelDefinition` (the CubeCL IR) and
-must return a PTX representation. This crate walks the IR with
-`compiler::walk`, maps it to a dialect-mir module, and drives
-`mir_importer::compile_module_to_ptx` (the cuda-oxide LLVM-NVPTX pipeline) to
-produce the final PTX bytes. The PTX is then loaded and launched through
-`cudarc` exactly as the stock `cubecl-cuda` (nvrtc) path does.
+`burn` elementwise `add` runs end to end on the GPU through cuda-oxide PTX, bit-exact against the stock nvrtc backend.
 
-Burn's `CubeBackend<CudaOxideRuntime>` is exposed as the public `CudaOxide`
-type alias, so the backend satisfies Burn's trait bounds.
+Measured on RTX 5060 Laptop, sm_120, ptxas 13.1:
+
+| Check | Result |
+| --- | --- |
+| `examples/tensor_add` | `[11, 22, 33, 44]` on device |
+| `tests/parity` numeric parity vs nvrtc | bit-exact (`to_bits()` equality, zero tolerance), N = 4096 and N = 4097 |
+| out-of-bounds bounds-check path (N = 4097, non-multiple of cube_dim) | bit-exact vs CPU oracle |
+| `tests/walk_table` (5 cases) | every emitted PTX passes `ptxas -arch=sm_120` |
+| `tests/parity` fixture provenance | reference cross-checked against CPU `a + b` and a live nvrtc run |
+| JIT latency, cold (LLVM pipeline + PTX load) | cuda-oxide ~192 ms vs nvrtc ~34 ms |
+| JIT latency, warm (cached kernel) | cuda-oxide ~0.43 ms vs nvrtc ~0.46 ms |
+
+## How it works
+
+CubeCL's `Compiler` trait hands a `KernelDefinition` (CubeCL IR) and expects a PTX representation. `CudaOxideCompiler` walks the IR into a cuda-oxide `dialect-mir` module and calls `mir_importer::compile_module_to_ptx` for the PTX bytes. The PTX is loaded and launched through `cudarc`, reusing the `cubecl-cuda` server with the nvrtc step removed. `CudaOxide = CubeBackend<CudaOxideRuntime>` is the Burn backend.
 
 ## M1 scope
 
-Milestone 1 covers the irreducible elementwise-add "spine":
+- `f32` only, line size 1 (scalar loads and stores, no vectorised `Line`).
+- Elementwise `add`: bounds-checked read and write, absolute-position index, PlainLayout metadata, info-buffer addressing.
+- No fusion, no autotune, no tensor-core paths. Anything outside this set fails loud at lowering.
 
-- Element type: `f32` only.
-- Line size: 1 (scalar loads/stores; no vectorised `Line`).
-- Operations: `Tensor::add` -- bounds-checked read/write, absolute-position
-  index, PlainLayout metadata, info-buffer addressing.
-- No fusion, no autotune, no tensor-core paths.
+## Build
 
-**Proven results (RTX 5060 Laptop, sm_120, N=4096 f32):**
+Requires sibling checkouts (path dependencies in `Cargo.toml`): `cuda-oxide` (branch with `compile_module_to_ptx`) and `burn` at the pinned cubecl revision `1d628d7`, laid out as `../cuda-oxide` and `../burn`.
 
-- `cargo run --example tensor_add` prints `[11.0, 22.0, 33.0, 44.0]`.
-- `cargo test --test parity`: cuda-oxide output is **bit-exact** against the
-  stock nvrtc reference (zero tolerance, checked via `to_bits()` equality over
-  4096 seeded values).
-- JIT latency: cold ~192 ms (LLVM pipeline + PTX load), warm ~0.43 ms (cached
-  kernel, at parity with nvrtc warm).
+Toolchain is the nightly pinned in `rust-toolchain.toml`; `rustup` selects it automatically.
 
-## Build contract
-
-### Toolchain
-
-The crate depends on `cuda-oxide`, which links `rustc_private` crates from the
-nightly compiler. The nightly channel and exact revision are pinned in
-`rust-toolchain.toml`; `rustup` picks it up automatically.
-
-### Consumer requirement
-
-Any binary, test, or example that transitively links `cuda-oxide`'s
-`mir-importer` **must** declare at its crate root:
+Any binary, test, or example that links `cuda-oxide`'s `mir-importer` must declare at its crate root:
 
 ```rust
 #![feature(rustc_private)]
 extern crate rustc_driver;
 ```
 
-Without these, linking fails with unresolved symbols from `rustc_private`.
-Both declarations are already present in `examples/tensor_add.rs` and
-`tests/parity.rs` as the canonical pattern to follow.
-
-### Environment
-
-Set `CUDA_OXIDE_TARGET` to the PTX target architecture before building or
-running:
+`compile_module_to_ptx` never hosts `rustc_driver`, so no runtime env knobs are needed. Set the PTX target before running:
 
 ```sh
-export CUDA_OXIDE_TARGET=sm_120   # RTX 50-series (Blackwell)
+export CUDA_OXIDE_TARGET=sm_120   # default is sm_80
 cargo run --example tensor_add
 ```
 
-If the variable is unset, `mir_importer` defaults to a conservative `sm_80`.
-
-## Repository layout
+## Layout
 
 ```
-src/
-  compiler/
-    abi.rs     -- KernelDefinition -> dialect-mir parameter types + info-buffer layout
-    walk.rs    -- CubeCL IR -> dialect-mir module walker
-    mod.rs     -- CudaOxideCompiler (Compiler trait impl)
-  compute/
-    context.rs -- CUDA context: PTX load, kernel launch
-    server.rs  -- CubeCL ComputeServer impl (vendored from cubecl-cuda)
-    ...
-  runtime.rs   -- CudaOxideRuntime (Runtime + CubeRuntime trait impls)
-  lib.rs
-examples/
-  tensor_add.rs  -- end-to-end Tensor::add, asserts [11,22,33,44]
-tests/
-  parity.rs      -- bit-exact comparison vs checked-in nvrtc reference
-  walk_table.rs  -- PTX-validity unit tests (no GPU required)
+src/compiler/   CudaOxideCompiler: KernelDefinition -> dialect-mir -> PTX (abi, walk, mod)
+src/compute/    CUDA context, PTX load and launch, ComputeServer (vendored from cubecl-cuda)
+src/runtime.rs  CudaOxideRuntime, CudaOxide backend alias
+examples/       tensor_add end to end
+tests/          parity (bit-exact vs nvrtc), walk_table (PTX validity, no GPU)
 ```
+
+## Licence
+
+MIT OR Apache-2.0.

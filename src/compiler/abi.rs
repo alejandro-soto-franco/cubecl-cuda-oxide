@@ -22,12 +22,13 @@
 //! ## Info-buffer layout (findings sections 4/5)
 //!
 //! ```text
-//! info[0 .. scalars_count)            = PlainLayout scalar lengths (one per view)
-//! info[scalars_count .. +buffers_len) = static per-buffer lengths
+//! info[0 .. meta_base)                         = scalar section (padded to 8 bytes)
+//! info[meta_base .. meta_base + buffers_len)   = static per-buffer lengths
 //! ```
 //!
-//! `Metadata::BufferLength { var: GlobalBuffer(i) }` therefore reads
-//! `info[scalars_count + i]`. The dynamic (shape/stride) section is empty
+//! `meta_base` is the padded scalar-section size in u32 slots (see
+//! `meta_base_index`). `Metadata::BufferLength { var: GlobalBuffer(i) }` therefore
+//! reads `info[meta_base + i]`. The dynamic (shape/stride) section is empty
 //! because no buffer carries extended metadata in this kernel.
 //!
 //! `convert_function_type` in mir-lower lowers each `MirPtrType` to a single

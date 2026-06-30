@@ -44,7 +44,7 @@ pliron = { git = "https://github.com/pliron-org/pliron", rev = "222dd962a124cba8
 cudarc = { version = "0.19.6", features = [
     "std",
     "driver",
-    "nvrtc",
+    "nvrtc",       # kept for cubecl dep-graph unification; unused on the cuda-oxide PTX path
     "nccl",
     "fallback-dynamic-loading",
     "cuda-version-from-build-system",

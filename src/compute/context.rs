@@ -185,7 +185,8 @@ impl CudaOxideContext {
         shared_mem_bytes: usize,
     ) -> Result<(), CompilationError> {
         let func_name = CString::new(entrypoint_name).unwrap();
-        // SAFETY: `ptx` is a valid null-terminated PTX binary from NVRTC. `func_name` is a
+        // SAFETY: `ptx` is PTX produced by the cuda-oxide LLVM-NVPTX pipeline,
+        // NUL-terminated before load_data (by `compile_kernel`). `func_name` is a
         // null-terminated `CString` matching the kernel entry point in the compiled module.
         let func = unsafe {
             let module = cudarc::driver::result::module::load_data(ptx.as_ptr() as *const _)

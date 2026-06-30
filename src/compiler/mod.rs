@@ -7,7 +7,7 @@
 use core::fmt;
 
 use cubecl_common::backtrace::BackTrace;
-use cubecl_core::ir::{ElemType, StorageType};
+use cubecl_core::ir::{ElemType, StorageType, UIntKind};
 use cubecl_runtime::{
     compiler::{CompilationError, Compiler},
     kernel::KernelDefinition,
@@ -49,8 +49,21 @@ impl Compiler for CudaOxideCompiler {
         kernel: KernelDefinition,
         _compilation_options: &Self::CompilationOptions,
         _mode: ExecutionMode,
-        _addr_type: StorageType,
+        addr_type: StorageType,
     ) -> Result<Self::Representation, CompilationError> {
+        // M1 hardwires a u32 info pointer and u32-unit metadata offsets.
+        // Guard loudly against any other address width so callers discover the
+        // limitation immediately rather than silently reading the wrong slot.
+        let u32_addr = StorageType::Scalar(ElemType::UInt(UIntKind::U32));
+        if addr_type != u32_addr {
+            return Err(CompilationError::Generic {
+                reason: format!(
+                    "unsupported address type: {addr_type:?} (M1 supports U32 metadata addressing only)"
+                ),
+                backtrace: BackTrace::capture(),
+            });
+        }
+
         let mut ctx = pliron::context::Context::new();
         mir_importer::translator::register_dialects(&mut ctx);
 
@@ -140,7 +153,7 @@ mod tests {
         let expected_name = walk::entry_name(&kernel);
 
         let mut compiler = CudaOxideCompiler;
-        // addr_type is ignored by our compiler; any valid value works.
+        // M1 only accepts U32 addressing; pass the matching StorageType.
         let addr_ty = StorageType::Scalar(ElemType::UInt(UIntKind::U32));
         let repr = compiler
             .compile(kernel, &(), ExecutionMode::Checked, addr_ty)

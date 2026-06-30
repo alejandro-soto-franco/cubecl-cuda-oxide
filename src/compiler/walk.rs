@@ -15,7 +15,7 @@
 //!   lowering time: an aggregate is a virtual tuple of already-lowered values,
 //!   so no MIR op or allocation is emitted (the slice offset is constant 0).
 //! - `Metadata::BufferLength { var: GlobalBuffer(i) }` -> a load from the info
-//!   buffer at `scalars_count + i` (see `abi.rs`).
+//!   buffer at `meta_base + i` (meta_base = padded scalar-section size in u32 slots; see `abi.rs`).
 //! - `Comparison::Lower` -> `mir.lt` (a direct `i1` `a < b`).
 //! - `Operator::And` / `Operator::Not` on `i1` -> `mir.bitand` / `mir.not`.
 //! - `Branch::If { cond, { Branch::Return } }` -> the `terminate!()` bounds

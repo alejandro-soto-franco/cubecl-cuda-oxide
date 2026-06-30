@@ -35,7 +35,7 @@ use cubecl_core::{
     MemoryConfiguration,
     ir::{
         AddressType, DeviceProperties, ElemType, FloatKind, HardwareProperties, IntKind,
-        MemoryDeviceProperties, Type, UIntKind, VectorSize,
+        MemoryDeviceProperties, Type, UIntKind,
         features::{AtomicUsage, TypeUsage},
     },
     server::ServerUtilities,
@@ -135,7 +135,14 @@ impl DeviceService for CudaOxideServer {
                 num_tensor_cores: None,
                 min_tensor_cores_dim: None,
                 num_cpu_cores: None,
-                max_vector_size: VectorSize::MAX,
+                // M1 scope is line_size = 1 (scalar f32). burn-cubecl picks the
+                // op line size from `client.io_optimized_vector_sizes`, which is
+                // `min(max_vector_size, load_width / elem_bits)`. Capping this to
+                // 1 forces scalar loads/stores/adds, matching the scalar walk in
+                // `compiler::walk` (vectorised `Line` lowering is M2+). Without
+                // this, contiguous f32 tensors would be traced as `Vector(f32,4)`,
+                // which the M1 walk does not lower.
+                max_vector_size: 1,
                 cube_mma_reserved_shared_memory: 0,
             }
         };
@@ -148,9 +155,16 @@ impl DeviceService for CudaOxideServer {
         );
         register_supported_types(&mut device_props);
 
-        // Grid constants (`__grid_constant__`) are available from Volta onward and
-        // change how kernel metadata is threaded to the launch in `server.rs`.
-        let grid_constants = arch_version >= 70;
+        // Grid constants (`__grid_constant__`) are available from Volta onward,
+        // but they change the kernel ABI: the info buffer is then passed BY VALUE
+        // as a grid-constant struct param rather than as a plain GLOBAL pointer.
+        // The M1 `compiler::walk` emits the info buffer as an ordinary global
+        // `u32` pointer, so grid constants are disabled here; `server.rs` then
+        // uploads the info buffer to device memory and binds it as a normal
+        // resource (`buffers ++ info`). Re-enabling grid constants is an M2 ABI
+        // task (matching cubecl-cpp's `__grid_constant__` parameter lowering).
+        let _ = arch_version;
+        let grid_constants = false;
 
         let cuda_ctx = CudaOxideContext::new(grid_constants, device_props.clone(), ctx);
         let logger = Arc::new(ServerLogger::default());

@@ -79,6 +79,29 @@ pub(crate) fn scalars_count(kernel: &KernelDefinition) -> usize {
     kernel.scalars.iter().map(|s| s.count).sum()
 }
 
+/// `INFO_ALIGN` from `cubecl-core/src/codegen/info.rs`: the info buffer is a
+/// `Vec<u64>`, so every section is padded to an 8-byte boundary.
+const INFO_ALIGN: usize = 8;
+
+/// The u32 index at which the static metadata (per-buffer lengths) begins inside
+/// the info buffer, i.e. the size of the scalar section in u32 slots.
+///
+/// `cubecl`'s `Info::new` lays the info buffer out as `[scalars | static_meta |
+/// dynamic_meta]` over a `Vec<u64>`. Each scalar group of `count` elements of a
+/// given type occupies `(ty.size() * count)` bytes rounded up to `INFO_ALIGN`,
+/// so 3 `u32` scalars take `(4*3).next_multiple_of(8) = 16` bytes = 4 u32 slots
+/// (3 values + 1 padding). The buffer-length for buffer `i` then lives at
+/// `meta_base_index + i` (`Metadata::buffer_len_index(i) = i`). Mirroring this
+/// exactly is what gives bit-identical metadata reads versus nvrtc.
+pub(crate) fn meta_base_index(kernel: &KernelDefinition) -> usize {
+    let scalar_bytes: usize = kernel
+        .scalars
+        .iter()
+        .map(|s| (s.ty.size() * s.count).next_multiple_of(INFO_ALIGN))
+        .sum();
+    scalar_bytes / 4
+}
+
 /// Whether the kernel carries an info buffer (a trailing GLOBAL `u32` pointer).
 /// Present whenever the kernel has scalar params, matching CubeCL's binding
 /// order. The M1 spine has no scalars and thus no info buffer.
@@ -110,13 +133,17 @@ pub(crate) fn kernel_param_types(
         }
     }
 
+    // Kernel parameters are the buffer pointers followed by the trailing info
+    // buffer pointer. Scalars are NOT separate parameters: cubecl folds the
+    // `PlainLayout` length scalars into the info buffer (its leading
+    // `scalars_count` slots), and the server binds only `buffers ++ info`
+    // (no per-scalar binding; `grid_constants` is disabled so info is a plain
+    // GLOBAL `u32` device pointer). The walk reads each `GlobalScalar(id)` from
+    // `info[id]` accordingly.
     let s_count = scalars_count(kernel);
-    let mut params = Vec::with_capacity(kernel.buffers.len() + s_count + 1);
+    let mut params = Vec::with_capacity(kernel.buffers.len() + 1);
     for buffer in &kernel.buffers {
         params.push(global_ptr_type(ctx, buffer.ty.elem_type())?);
-    }
-    for _ in 0..s_count {
-        params.push(u32_mir_type(ctx));
     }
     if s_count > 0 {
         params.push(info_ptr_type(ctx));

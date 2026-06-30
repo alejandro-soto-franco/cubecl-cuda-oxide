@@ -33,15 +33,19 @@ use std::collections::HashMap;
 use std::num::NonZero;
 
 use cubecl_core::ir::{
-    Arithmetic, Branch, Builtin, Comparison, ElemType, Memory, Metadata, Operation, Operator,
-    Variable, VariableKind,
+    Arithmetic, Branch, Builtin, Comparison, ConstantValue, ElemType, Memory, Metadata, Operation,
+    Operator, Variable, VariableKind,
 };
 use cubecl_runtime::kernel::KernelDefinition;
 use dialect_mir::ops::{
     MirAddOp, MirBitAndOp, MirConstantOp, MirCondBranchOp, MirFuncOp, MirLoadOp, MirLtOp, MirMulOp,
     MirNotOp, MirPtrOffsetOp, MirReturnOp, MirStoreOp,
 };
-use dialect_nvvm::ops::{ReadPtxSregCtaidXOp, ReadPtxSregNtidXOp, ReadPtxSregTidXOp};
+use dialect_nvvm::ops::{
+    ReadPtxSregCtaidXOp, ReadPtxSregCtaidYOp, ReadPtxSregCtaidZOp, ReadPtxSregNctaidXOp,
+    ReadPtxSregNctaidYOp, ReadPtxSregNtidXOp, ReadPtxSregNtidYOp, ReadPtxSregNtidZOp,
+    ReadPtxSregTidXOp, ReadPtxSregTidYOp, ReadPtxSregTidZOp,
+};
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -115,9 +119,10 @@ struct Lowering {
     abs_pos: Option<Value>,
     /// The info-buffer pointer param (present iff the kernel carries scalars).
     info_ptr: Option<Value>,
-    /// Number of scalar slots, the base offset of buffer lengths in the info
-    /// buffer.
-    scalars_count: usize,
+    /// u32 index inside the info buffer at which the per-buffer length metadata
+    /// begins (the scalar section size in u32 slots, padded to 8 bytes). See
+    /// `abi::meta_base_index`.
+    meta_base: usize,
     i32_ty: TypeHandle,
     i1_ty: TypeHandle,
 }
@@ -130,6 +135,21 @@ impl Lowering {
         match var.kind {
             VariableKind::Builtin(Builtin::AbsolutePos)
             | VariableKind::Builtin(Builtin::AbsolutePosX) => Ok(self.absolute_pos(ctx)),
+            // Inline constant operands (e.g. the `PlainLayout` slice offset
+            // `const 0`) are materialised on demand as a MIR constant. M1 only
+            // needs integer constants (slice offsets / indices, lowered into the
+            // `i32` index domain). Float/bool constant operands do not occur in
+            // `Tensor::add`, so they fail loud rather than guess a type.
+            VariableKind::Constant(c) => match c {
+                ConstantValue::Int(v) => Ok(self.iconst(ctx, v)),
+                ConstantValue::UInt(v) => Ok(self.iconst(ctx, v as i64)),
+                other => Err(format!(
+                    "unsupported constant operand {other:?}: only integer constants are lowered in M1"
+                )),
+            },
+            // `PlainLayout` length scalars are not kernel params; read them from
+            // the info buffer at `info[id]` (the leading scalars section).
+            VariableKind::GlobalScalar(id) => self.info_load(ctx, id as usize),
             kind => match self.values.get(&kind) {
                 Some(Lowered::Val(v)) => Ok(*v),
                 Some(Lowered::Aggregate(_)) => {
@@ -140,56 +160,99 @@ impl Lowering {
         }
     }
 
-    /// `i = ctaid.x * ntid.x + tid.x`, computed once into the current block and
-    /// cached.
+    /// The flattened global thread index `ABSOLUTE_POS` (cubecl's `idxGlobal`),
+    /// computed once into the current block and cached.
+    ///
+    /// burn launches elementwise kernels with multi-dimensional cube (block) and
+    /// grid shapes (`CubeDim::new` returns a 2D `plane_size x plane_count`
+    /// block), so the X-only `ctaid.x * ntid.x + tid.x` is wrong whenever the
+    /// block or grid extends past X. This reproduces cubecl-cpp's exact formula
+    /// (`cubecl-cpp/src/shared/kernel.rs`):
+    ///
+    /// ```text
+    /// ap{d}    = ctaid.{d} * ntid.{d} + tid.{d}      // per-dimension
+    /// idxGlobal = ap_z * (nctaid.x*ntid.x*nctaid.y*ntid.y)
+    ///           + ap_y * (nctaid.x*ntid.x)
+    ///           + ap_x
+    /// ```
+    ///
+    /// All arithmetic is in the `i32` index domain, matching the f32 element size
+    /// `mul.wide` indexing that follows. Integer math, so the grouping is exact.
     fn absolute_pos(&mut self, ctx: &mut Context) -> Value {
         if let Some(v) = self.abs_pos {
             return v;
         }
-        let i32_ty = self.i32_ty;
-        let block = self.current;
-        let tid = emit(
-            ctx,
-            block,
-            ReadPtxSregTidXOp::get_concrete_op_info(),
-            vec![i32_ty],
-            vec![],
-        )
-        .expect("tid read has a result");
-        let ctaid = emit(
-            ctx,
-            block,
-            ReadPtxSregCtaidXOp::get_concrete_op_info(),
-            vec![i32_ty],
-            vec![],
-        )
-        .expect("ctaid read has a result");
-        let ntid = emit(
-            ctx,
-            block,
-            ReadPtxSregNtidXOp::get_concrete_op_info(),
-            vec![i32_ty],
-            vec![],
-        )
-        .expect("ntid read has a result");
-        let block_base = emit(
-            ctx,
-            block,
-            MirMulOp::get_concrete_op_info(),
-            vec![i32_ty],
-            vec![ctaid, ntid],
-        )
-        .expect("mul has a result");
-        let idx = emit(
-            ctx,
-            block,
-            MirAddOp::get_concrete_op_info(),
-            vec![i32_ty],
-            vec![block_base, tid],
-        )
-        .expect("add has a result");
+        // Per-dimension absolute positions: ctaid.d * ntid.d + tid.d.
+        let tid_x = self.sreg(ctx, ReadPtxSregTidXOp::get_concrete_op_info());
+        let tid_y = self.sreg(ctx, ReadPtxSregTidYOp::get_concrete_op_info());
+        let tid_z = self.sreg(ctx, ReadPtxSregTidZOp::get_concrete_op_info());
+        let ctaid_x = self.sreg(ctx, ReadPtxSregCtaidXOp::get_concrete_op_info());
+        let ctaid_y = self.sreg(ctx, ReadPtxSregCtaidYOp::get_concrete_op_info());
+        let ctaid_z = self.sreg(ctx, ReadPtxSregCtaidZOp::get_concrete_op_info());
+        let ntid_x = self.sreg(ctx, ReadPtxSregNtidXOp::get_concrete_op_info());
+        let ntid_y = self.sreg(ctx, ReadPtxSregNtidYOp::get_concrete_op_info());
+        let ntid_z = self.sreg(ctx, ReadPtxSregNtidZOp::get_concrete_op_info());
+        let nctaid_x = self.sreg(ctx, ReadPtxSregNctaidXOp::get_concrete_op_info());
+        let nctaid_y = self.sreg(ctx, ReadPtxSregNctaidYOp::get_concrete_op_info());
+
+        let ap_x = {
+            let m = self.muli(ctx, ctaid_x, ntid_x);
+            self.addi(ctx, m, tid_x)
+        };
+        let ap_y = {
+            let m = self.muli(ctx, ctaid_y, ntid_y);
+            self.addi(ctx, m, tid_y)
+        };
+        let ap_z = {
+            let m = self.muli(ctx, ctaid_z, ntid_z);
+            self.addi(ctx, m, tid_z)
+        };
+
+        // stride_y = cube_count_x * cube_dim_x; stride_z = stride_y * cube_count_y * cube_dim_y.
+        let stride_y = self.muli(ctx, nctaid_x, ntid_x);
+        let stride_z = {
+            let cc_y_cd_y = self.muli(ctx, nctaid_y, ntid_y);
+            self.muli(ctx, stride_y, cc_y_cd_y)
+        };
+
+        let term_z = self.muli(ctx, ap_z, stride_z);
+        let term_y = self.muli(ctx, ap_y, stride_y);
+        let idx = {
+            let zy = self.addi(ctx, term_z, term_y);
+            self.addi(ctx, zy, ap_x)
+        };
+
         self.abs_pos = Some(idx);
         idx
+    }
+
+    /// Read a 32-bit special register (tid/ctaid/ntid/nctaid component).
+    fn sreg(&mut self, ctx: &mut Context, info: OpInfo) -> Value {
+        emit(ctx, self.current, info, vec![self.i32_ty], vec![]).expect("sreg read has a result")
+    }
+
+    /// `a * b` in the i32 index domain.
+    fn muli(&mut self, ctx: &mut Context, a: Value, b: Value) -> Value {
+        emit(
+            ctx,
+            self.current,
+            MirMulOp::get_concrete_op_info(),
+            vec![self.i32_ty],
+            vec![a, b],
+        )
+        .expect("mul has a result")
+    }
+
+    /// `a + b` in the i32 index domain.
+    fn addi(&mut self, ctx: &mut Context, a: Value, b: Value) -> Value {
+        emit(
+            ctx,
+            self.current,
+            MirAddOp::get_concrete_op_info(),
+            vec![self.i32_ty],
+            vec![a, b],
+        )
+        .expect("add has a result")
     }
 
     /// Emit an `i32` constant into the current block.
@@ -208,6 +271,36 @@ impl Lowering {
         MirConstantOp::new(op).set_attr_value(ctx, attr);
         op.insert_at_back(self.current, ctx);
         op.deref(ctx).get_result(0)
+    }
+
+    /// Load a 32-bit value from the info buffer at `index` (a u32-element
+    /// offset, not bytes). The info buffer is the trailing GLOBAL `u32` pointer
+    /// param laid out as `[scalars | static_meta | dynamic_meta]`: scalar
+    /// `GlobalScalar(id)` is at `info[id]`, and buffer length `id` is at
+    /// `info[meta_base + id]` (see `abi::meta_base_index`).
+    fn info_load(&mut self, ctx: &mut Context, index: usize) -> Result<Value, String> {
+        let info = self.info_ptr.ok_or(
+            "info-buffer access requires an info-buffer param, but the kernel carries none",
+        )?;
+        let idx_val = self.iconst(ctx, index as i64);
+        let info_ptr_ty = abi::info_ptr_type(ctx);
+        let elem_ptr = emit(
+            ctx,
+            self.current,
+            MirPtrOffsetOp::get_concrete_op_info(),
+            vec![info_ptr_ty],
+            vec![info, idx_val],
+        )
+        .expect("ptr_offset has a result");
+        let val = emit(
+            ctx,
+            self.current,
+            MirLoadOp::get_concrete_op_info(),
+            vec![self.i32_ty],
+            vec![elem_ptr],
+        )
+        .expect("load has a result");
+        Ok(val)
     }
 
     /// Bind an instruction output variable to a single value.
@@ -274,14 +367,13 @@ pub fn lower_kernel(
     let func_region = func.get_operation().deref(ctx).get_region(0);
     entry.insert_at_front(func_region, ctx);
 
-    let scalars_count = abi::scalars_count(kernel);
     let mut state = Lowering {
         current: entry,
         func_region,
         values: HashMap::new(),
         abs_pos: None,
         info_ptr: None,
-        scalars_count,
+        meta_base: abi::meta_base_index(kernel),
         i32_ty,
         i1_ty,
     };
@@ -292,20 +384,20 @@ pub fn lower_kernel(
             .values
             .insert(VariableKind::GlobalBuffer(buffer.id), Lowered::Val(arg));
     }
-    for i in 0..scalars_count {
-        let arg = entry.deref(ctx).get_argument(n_buf + i);
-        state
-            .values
-            .insert(VariableKind::GlobalScalar(i as u32), Lowered::Val(arg));
-    }
+    // Scalars are not kernel params; they live in the info buffer and are read on
+    // demand (see `GlobalScalar` in `resolve`). The info-buffer pointer is the
+    // single trailing param, right after the buffers.
     if abi::has_info_buffer(kernel) {
-        state.info_ptr = Some(entry.deref(ctx).get_argument(n_buf + scalars_count));
+        state.info_ptr = Some(entry.deref(ctx).get_argument(n_buf));
     }
 
-    // Walk the body.
+    // Walk the body. Lowering errors are annotated with the offending
+    // instruction index and operation so a fail-loud `Err` pinpoints the op.
     let instructions = kernel.body.instructions.borrow();
-    for inst in instructions.iter() {
-        lower_instruction(ctx, &mut state, inst)?;
+    for (i, inst) in instructions.iter().enumerate() {
+        lower_instruction(ctx, &mut state, inst).map_err(|e| {
+            format!("{e} (while lowering body instruction {i}: {:?})", inst.operation)
+        })?;
     }
     drop(instructions);
 
@@ -356,11 +448,14 @@ fn lower_instruction(
                     return Err(format!("unresolved aggregate: {:?}", op.aggregate.kind));
                 }
             };
-            let lowered = state
-                .values
-                .get(&elem_var.kind)
-                .cloned()
-                .ok_or_else(|| format!("unresolved aggregate element: {:?}", elem_var.kind))?;
+            // The element is usually a previously-lowered value or a nested
+            // aggregate. It can also be an inline constant (the slice offset
+            // `const 0`), which is never recorded in `values`; materialise it
+            // through `resolve` in that case.
+            let lowered = match state.values.get(&elem_var.kind) {
+                Some(l) => l.clone(),
+                None => Lowered::Val(state.resolve(ctx, &elem_var)?),
+            };
             let out = inst
                 .out
                 .ok_or("ExtractAggregateField has no output variable")?;
@@ -368,36 +463,15 @@ fn lower_instruction(
             Ok(())
         }
 
-        // Buffer length -> load from the info buffer at `scalars_count + i`.
+        // Buffer length -> load from the info buffer at `scalars_count + id`.
         Operation::Metadata(Metadata::BufferLength { var }) => {
-            let info = state.info_ptr.ok_or(
-                "BufferLength requires an info-buffer param, but the kernel carries no scalars",
-            )?;
             let id = match var.kind {
                 VariableKind::GlobalBuffer(id) => id as usize,
                 other => {
                     return Err(format!("unsupported BufferLength target: {other:?}"));
                 }
             };
-            let index = state.scalars_count + id;
-            let idx_val = state.iconst(ctx, index as i64);
-            let info_ptr_ty = abi::info_ptr_type(ctx);
-            let elem_ptr = emit(
-                ctx,
-                state.current,
-                MirPtrOffsetOp::get_concrete_op_info(),
-                vec![info_ptr_ty],
-                vec![info, idx_val],
-            )
-            .expect("ptr_offset has a result");
-            let len = emit(
-                ctx,
-                state.current,
-                MirLoadOp::get_concrete_op_info(),
-                vec![state.i32_ty],
-                vec![elem_ptr],
-            )
-            .expect("load has a result");
+            let len = state.info_load(ctx, state.meta_base + id)?;
             state.bind_val(inst.out, len)
         }
 
@@ -446,12 +520,15 @@ fn lower_instruction(
             Ok(())
         }
 
-        // `lhs + rhs` -> mir.add.
+        // `lhs + rhs` -> mir.add. Add appears in two domains in a real
+        // `Tensor::add`: the f32 element sum (`a + b`) and the integer index
+        // arithmetic `slice_offset + ABSOLUTE_POS` (u32, lowered into the i32
+        // index domain that `ptr_offset`/`ABSOLUTE_POS` already use).
         Operation::Arithmetic(Arithmetic::Add(op)) => {
             let lhs = state.resolve(ctx, &op.lhs)?;
             let rhs = state.resolve(ctx, &op.rhs)?;
             let out = inst.out.ok_or("Arithmetic::Add has no output variable")?;
-            let ty = abi::mir_elem_type(ctx, out.ty.elem_type())?;
+            let ty = arith_result_type(ctx, state, out.ty.elem_type())?;
             let res = emit(
                 ctx,
                 state.current,
@@ -585,6 +662,24 @@ fn lower_instruction(
 
         // Loud failure on every other operation kind.
         other => Err(format!("unsupported operation: {other:?}")),
+    }
+}
+
+/// Result type for an arithmetic op, selecting the right domain: `f32` element
+/// arithmetic maps to `FP32`, integer/unsigned (index) arithmetic maps to the
+/// `i32` index domain shared by `ABSOLUTE_POS` and `ptr_offset`. Other element
+/// types are out of M1 scope and fail loud.
+fn arith_result_type(
+    ctx: &mut Context,
+    state: &Lowering,
+    elem: ElemType,
+) -> Result<TypeHandle, String> {
+    match elem {
+        ElemType::Float(_) => abi::mir_elem_type(ctx, elem),
+        ElemType::Int(_) | ElemType::UInt(_) => Ok(state.i32_ty),
+        other => Err(format!(
+            "unsupported arithmetic result type: {other:?} (M1 supports f32 and integer index math)"
+        )),
     }
 }
 

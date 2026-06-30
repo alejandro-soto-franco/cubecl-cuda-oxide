@@ -83,3 +83,82 @@ impl Compiler for CudaOxideCompiler {
         "ptx"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Entry-symbol invariant tests (no GPU required).
+    //!
+    //! The single source of truth is `walk::entry_name(&kernel)`:
+    //! - `lower_kernel` passes it to `MirFuncOp::set_symbol_name` (PTX symbol).
+    //! - `PtxRepresentation.entry_name` stores the same value.
+    //! - `CudaOxideContext::compile_kernel` now uses `repr.entry_name` (not
+    //!   `kernel_compiled.entrypoint_name`) when calling `get_function`.
+    //!
+    //! These tests verify all three are consistent without launching a kernel.
+    use super::*;
+    use cubecl_core::{
+        ir::{ElemType, Scope, StorageType, UIntKind},
+        server::ExecutionMode,
+    };
+    use cubecl_runtime::kernel::{KernelDefinition, KernelOptions};
+    use cubecl_runtime::server::CubeDim;
+
+    /// Build a minimal `KernelDefinition` with no buffers and an empty body so
+    /// that `lower_kernel` succeeds without needing any GPU or CubeCL codegen.
+    fn minimal_kernel(kernel_name: &str) -> KernelDefinition {
+        KernelDefinition {
+            buffers: vec![],
+            tensor_maps: vec![],
+            scalars: vec![],
+            cube_dim: CubeDim { x: 1, y: 1, z: 1 },
+            body: Scope::root(false),
+            options: KernelOptions {
+                kernel_name: kernel_name.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// `walk::entry_name` trims whitespace and falls back to `"kernel"` when
+    /// the name is blank.  These are the ONLY transformations applied to
+    /// `kernel_name` before it becomes the PTX symbol and `repr.entry_name`.
+    #[test]
+    fn entry_name_trim_and_fallback() {
+        assert_eq!(walk::entry_name(&minimal_kernel("")), "kernel");
+        assert_eq!(walk::entry_name(&minimal_kernel("  ")), "kernel");
+        assert_eq!(walk::entry_name(&minimal_kernel("my_kernel")), "my_kernel");
+        assert_eq!(walk::entry_name(&minimal_kernel("  padded  ")), "padded");
+    }
+
+    /// The PTX emitted by the full cuda-oxide pipeline must contain
+    /// `.visible .entry <repr.entry_name>`, and `repr.entry_name` must equal
+    /// what `walk::entry_name` returns -- verifying the round-trip from
+    /// `KernelDefinition` -> PTX symbol -> `get_function` name.
+    #[test]
+    fn ptx_entry_symbol_matches_repr_entry_name() {
+        let kernel = minimal_kernel("test_oxide_kernel");
+        let expected_name = walk::entry_name(&kernel);
+
+        let mut compiler = CudaOxideCompiler;
+        // addr_type is ignored by our compiler; any valid value works.
+        let addr_ty = StorageType::Scalar(ElemType::UInt(UIntKind::U32));
+        let repr = compiler
+            .compile(kernel, &(), ExecutionMode::Checked, addr_ty)
+            .expect("minimal kernel should compile to PTX");
+
+        // repr.entry_name must match walk::entry_name.
+        assert_eq!(
+            repr.entry_name, expected_name,
+            "repr.entry_name diverged from walk::entry_name"
+        );
+
+        // PTX text must contain the entry declaration.
+        let ptx = String::from_utf8_lossy(&repr.ptx);
+        let expected_decl = format!(".visible .entry {}", repr.entry_name);
+        assert!(
+            ptx.contains(&expected_decl),
+            "PTX does not contain expected entry declaration {expected_decl:?}\n\
+             PTX:\n{ptx}"
+        );
+    }
+}

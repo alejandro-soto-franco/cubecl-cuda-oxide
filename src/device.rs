@@ -1,3 +1,4 @@
+use burn_backend::{BoolStore, DType, DeviceOps, DeviceSettings};
 use cubecl_common::device::{Device, DeviceId};
 
 // It is not clear if CUDA has a limit on the number of bindings it can hold at
@@ -29,5 +30,19 @@ impl Device for CudaDevice {
             type_id: 0,
             index_id: self.index as u16,
         }
+    }
+}
+
+/// Burn [`DeviceOps`] impl for `CudaDevice`. Mirrors the cubecl-cuda defaults:
+/// f32 floats, i32 ints, u8-packed booleans, no complex dtype.
+impl DeviceOps for CudaDevice {
+    fn defaults(&self) -> DeviceSettings {
+        DeviceSettings::new(
+            DType::F32,
+            DType::I32,
+            DType::Bool(BoolStore::U8),
+            None::<DType>,
+            Default::default(),
+        )
     }
 }

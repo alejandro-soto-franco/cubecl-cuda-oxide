@@ -143,11 +143,20 @@ impl CudaOxideContext {
         // M1 lowers no shared memory.
         let shared_mem_bytes = 0;
 
+        // Single source of truth for the entry-point name: `repr.entry_name`,
+        // which is set by `walk::entry_name(&kernel)` — the same function that
+        // `lower_kernel` passes to `MirFuncOp::set_symbol_name`.  Using
+        // `kernel_compiled.entrypoint_name` (= raw `options.kernel_name`) would
+        // diverge when the name is blank or has surrounding whitespace, because
+        // `walk::entry_name` trims and falls back to `"kernel"` while
+        // `entrypoint_name` does not.
+        let entry_name = repr.entry_name.clone();
+
         if let Some(cache) = &mut self.ptx_cache {
             let result = cache.insert(
                 hash.unwrap(),
                 PtxCacheEntry {
-                    entrypoint_name: kernel_compiled.entrypoint_name.clone(),
+                    entrypoint_name: entry_name.clone(),
                     shared_mem_bytes,
                     ptx: ptx.clone(),
                 },
@@ -160,7 +169,7 @@ impl CudaOxideContext {
         self.load_ptx(
             ptx,
             kernel_id.clone(),
-            kernel_compiled.entrypoint_name,
+            entry_name,
             cube_dim,
             shared_mem_bytes,
         )?;

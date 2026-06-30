@@ -16,3 +16,12 @@ pub mod compiler;
 pub mod compute;
 pub mod device;
 pub mod runtime;
+
+pub use runtime::{CudaOxideDevice, CudaOxideRuntime};
+
+/// Burn backend backed by the cuda-oxide PTX pipeline.
+///
+/// `CubeBackend<CudaOxideRuntime>` is single-parameter at this rev of
+/// burn-cubecl (matches `pub type Cuda = CubeBackend<CudaRuntime>` in
+/// burn-cuda), so no element-type type parameters are needed here.
+pub type CudaOxide = burn_cubecl::CubeBackend<CudaOxideRuntime>;

@@ -1,4 +1,14 @@
-//! Device-service glue for [`CudaOxideServer`].
+//! Device-service glue and [`cubecl_core::Runtime`] impl for the cuda-oxide backend.
+//!
+//! The file splits into two halves:
+//!
+//! 1. [`DeviceService`] impl for [`CudaOxideServer`] – device init, property
+//!    probing, memory config.  Written in Task 7.
+//!
+//! 2. [`cubecl_core::Runtime`] impl for [`CudaOxideRuntime`] and the
+//!    [`burn_cubecl::CubeRuntime`] sub-trait impl that lets
+//!    `CubeBackend<CudaOxideRuntime>` satisfy Burn's backend bounds.  Added
+//!    in Task 8.
 //!
 //! This is the cuda-oxide analogue of `cubecl-cuda`'s `runtime.rs`, reduced to
 //! the pieces required to satisfy the `ComputeServer` supertrait
@@ -17,6 +27,10 @@ use cubecl_common::{
     device::{Device, DeviceId, DeviceService, ServerUtilitiesHandle},
     profile::TimingMethod,
 };
+// Additional imports needed by the Runtime / CubeRuntime impls (Task 8).
+use cubecl_core::{Runtime, client::ComputeClient};
+use cubecl_core::ir::TargetProperties;
+use cubecl_core::zspace::{Shape, Strides, striding::has_pitched_row_major_strides};
 use cubecl_core::{
     MemoryConfiguration,
     ir::{
@@ -199,3 +213,71 @@ fn register_supported_types(props: &mut DeviceProperties) {
         props.register_atomic_type_usage(Type::atomic(ty), AtomicUsage::Add | AtomicUsage::LoadStore);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 8: Runtime trait impl + Burn CubeRuntime sub-trait
+// ---------------------------------------------------------------------------
+
+/// Re-export for callers that want the device type under the oxide name.
+pub use crate::device::CudaDevice as CudaOxideDevice;
+
+/// Zero-sized marker type identifying the cuda-oxide `Runtime`.
+///
+/// Plugs into `CubeBackend<CudaOxideRuntime>` to satisfy Burn's backend
+/// bounds.  At this milestone the backend emits a `pub type CudaOxide` alias
+/// but no Burn ops are registered yet (that is Task 9).
+#[derive(Debug, Clone, Default)]
+pub struct CudaOxideRuntime;
+
+impl Runtime for CudaOxideRuntime {
+    type Compiler = crate::compiler::CudaOxideCompiler;
+    type Server = CudaOxideServer;
+    type Device = CudaDevice;
+
+    fn client(device: &Self::Device) -> ComputeClient<Self> {
+        ComputeClient::load(device)
+    }
+
+    fn name(_client: &ComputeClient<Self>) -> &'static str {
+        "cuda-oxide"
+    }
+
+    /// The info buffer carries array lengths, so cubecl must include them.
+    fn require_array_lengths() -> bool {
+        true
+    }
+
+    /// CUDA grid-dimension limits (x: i32::MAX, y/z: u16::MAX), matching the
+    /// cubecl-cuda template.
+    fn max_cube_count() -> (u32, u32, u32) {
+        (i32::MAX as u32, u16::MAX as u32, u16::MAX as u32)
+    }
+
+    /// A tensor is readable as-is iff it has pitched row-major strides.
+    fn can_read_tensor(shape: &Shape, strides: &Strides) -> bool {
+        has_pitched_row_major_strides(shape, strides)
+    }
+
+    /// M1 scope: default MMA properties (no Tensor-Core kernels yet).
+    fn target_properties() -> TargetProperties {
+        TargetProperties::default()
+    }
+
+    fn enumerate_devices(
+        _type_id: u16,
+        _info: &<Self::Server as cubecl_core::server::ComputeServer>::Info,
+    ) -> Vec<DeviceId> {
+        let count = cudarc::driver::CudaContext::device_count().unwrap_or(0) as usize;
+        (0..count)
+            .map(|i| DeviceId {
+                type_id: 0,
+                index_id: i as u16,
+            })
+            .collect()
+    }
+}
+
+// `burn_cubecl::CubeRuntime` is provided by a blanket impl in burn-cubecl for
+// every type that implements `cubecl_core::Runtime` whose `Device` implements
+// `burn_backend::DeviceOps`.  Both conditions are satisfied above, so no
+// explicit impl is needed here.

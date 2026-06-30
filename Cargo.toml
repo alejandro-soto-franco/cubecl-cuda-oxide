@@ -56,5 +56,9 @@ derive-new = { version = "0.7.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 
+# Burn backend integration: CubeBackend<CudaOxideRuntime> = CudaOxide.
+burn-backend = { path = "/home/alejandrosotofranco/burn/crates/burn-backend", version = "0.22.0-pre.1", default-features = false, features = ["std"] }
+burn-cubecl = { path = "/home/alejandrosotofranco/burn/crates/burn-cubecl", version = "0.22.0-pre.1", default-features = false, features = ["std"] }
+
 [dev-dependencies]
-# burn-cubecl + burn-cuda are added in Task 9 for the e2e example.
+# burn-cuda added in Task 9 for the e2e example.

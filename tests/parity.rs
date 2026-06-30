@@ -103,6 +103,47 @@ fn cuda_oxide_add_matches_nvrtc_reference() {
     assert_eq!(mismatches, 0, "{mismatches}/{N} elements differ from the nvrtc reference");
 }
 
+/// Hardening test: exercises the runtime bounds-check early-return path in walk.rs.
+///
+/// N = 4097 is not a multiple of the cube dimension (256), so the last CUDA block
+/// contains 255 out-of-bounds threads that must take the `Branch::If { Branch::Return }`
+/// -> `cond_br` -> ret_block path. CPU `a[i] + b[i]` is the oracle (deterministic from
+/// the same seed; validated bit-exact by `reference_fixture_is_correct`). Passing this
+/// test proves the bounds-check guard fires correctly at runtime.
+#[test]
+fn cuda_oxide_add_bounds_check_oob_threads() {
+    const N_OOB: usize = 4097; // not a multiple of cube_dim=256; last block has 255 oob threads
+    // SAFETY: single-threaded test setup, before any backend work.
+    unsafe {
+        std::env::set_var("CUDA_OXIDE_TARGET", "sm_120");
+    }
+
+    let (a, b) = seeded_inputs(N_OOB);
+    let out = run_add::<CudaOxide>(&a, &b);
+
+    assert_eq!(out.len(), N_OOB, "length mismatch");
+
+    let mut mismatches = 0usize;
+    for i in 0..N_OOB {
+        let cpu = a[i] + b[i];
+        if out[i].to_bits() != cpu.to_bits() {
+            if mismatches < 8 {
+                eprintln!(
+                    "mismatch at {i}: oxide={} ({:#x}) cpu={cpu} ({:#x})",
+                    out[i],
+                    out[i].to_bits(),
+                    cpu.to_bits()
+                );
+            }
+            mismatches += 1;
+        }
+    }
+    assert_eq!(
+        mismatches, 0,
+        "{mismatches}/{N_OOB} elements differ from CPU reference (bounds-check path may be broken)"
+    );
+}
+
 /// Cross-check the checked-in fixture against a CPU-computed sum, so a corrupt
 /// or stale fixture cannot make the parity test pass vacuously.
 #[test]

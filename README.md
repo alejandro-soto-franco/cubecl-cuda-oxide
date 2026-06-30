@@ -2,7 +2,7 @@
 
 A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVlabs/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT: no C++ compiler, no nvrtc, no CUDA SDK headers at build time.
 
-## Status (M1)
+## Status
 
 `burn` elementwise `add` runs end to end on the GPU through cuda-oxide PTX, bit-exact against the stock nvrtc backend.
 
@@ -22,11 +22,23 @@ Measured on RTX 5060 Laptop, sm_120, ptxas 13.1:
 
 CubeCL's `Compiler` trait hands a `KernelDefinition` (CubeCL IR) and expects a PTX representation. `CudaOxideCompiler` walks the IR into a cuda-oxide `dialect-mir` module and calls `mir_importer::compile_module_to_ptx` for the PTX bytes. The PTX is loaded and launched through `cudarc`, reusing the `cubecl-cuda` server with the nvrtc step removed. `CudaOxide = CubeBackend<CudaOxideRuntime>` is the Burn backend.
 
-## M1 scope
+## Progress
 
-- `f32` only, line size 1 (scalar loads and stores, no vectorised `Line`).
-- Elementwise `add`: bounds-checked read and write, absolute-position index, PlainLayout metadata, info-buffer addressing.
-- No fusion, no autotune, no tensor-core paths. Anything outside this set fails loud at lowering.
+Working now:
+
+- `f32` elementwise `add`, end to end, bit-exact against nvrtc.
+- `dialect-mir` lowering of the add op surface: bounds-checked read and write, absolute-position index, PlainLayout metadata, info-buffer addressing. Line size 1 (scalar loads and stores).
+- Fail-loud rejection of any unsupported op or address type at lowering.
+- PTX load and launch through the vendored `cubecl-cuda` server.
+
+Next:
+
+1. More elementwise ops and reductions.
+2. Vectorised `Line` (line size greater than 1) for the contiguous fast path.
+3. Dtypes beyond `f32`; multi-type scalar metadata.
+4. Non-contiguous and higher-rank tensors; `u64` metadata addressing.
+5. Fusion and autotune; broader Burn model coverage.
+6. Upstream the backend into a CubeCL fork.
 
 ## Build
 

@@ -1,28 +1,45 @@
 //! Kernel ABI: mapping CubeCL `KernelDefinition` buffers/scalars to the
 //! dialect-mir function-parameter types the walk builds the entry block from.
 //!
-//! ## Mapping (M1 spine)
+//! ## Parameter order (full `Tensor::add` surface)
 //!
-//! Each global buffer becomes exactly one `MirPtrType` in the GLOBAL address
-//! space, in declaration order (`kernel.buffers[0]` -> param 0, ...). The
-//! pointee is the buffer's element type (`f32` only for M1). Every buffer
-//! pointer is emitted `is_mutable = true`: `KernelArg` carries no per-buffer
-//! visibility in this CubeCL revision, so we take the writable superset, which
-//! still permits loads from read-only inputs.
+//! The kernel signature is, in order:
 //!
-//! `convert_function_type` in mir-lower lowers each `MirPtrType{addrspace}` to
-//! a single `.param .u64`, so an N-buffer kernel yields an N-pointer PTX entry
-//! whose parameters are the buffer base addresses in declaration order.
+//! 1. **Buffer pointers.** Each global buffer becomes one `MirPtrType` in the
+//!    GLOBAL address space, in declaration order (`kernel.buffers[0]` -> param
+//!    0, ...). The pointee is the buffer's element type (`f32` only for M1).
+//!    Every buffer pointer is `is_mutable = true`: `KernelArg` carries no
+//!    per-buffer visibility, so we take the writable superset, which still
+//!    permits loads from read-only inputs.
+//! 2. **Scalar values.** Each `ScalarKernelArg { ty: U32, count }` expands to
+//!    `count` by-value `i32` (signless 32-bit) params. These are the
+//!    `PlainLayout` length scalars CubeCL registers, one per view. M1 supports
+//!    `u32` scalars only; any other scalar element type is rejected loudly.
+//! 3. **Info buffer.** When the kernel carries any scalar, a trailing GLOBAL,
+//!    read-only `u32` pointer is appended: the info buffer the CUDA server
+//!    binds last (`cubecl-cuda/src/compute/server.rs`: buffers, then info).
 //!
-//! Scalars are appended after buffers in the full ABI; the M1 spine carries
-//! none, so a non-empty scalar list is rejected loudly rather than silently
-//! dropped.
+//! ## Info-buffer layout (findings sections 4/5)
+//!
+//! ```text
+//! info[0 .. scalars_count)            = PlainLayout scalar lengths (one per view)
+//! info[scalars_count .. +buffers_len) = static per-buffer lengths
+//! ```
+//!
+//! `Metadata::BufferLength { var: GlobalBuffer(i) }` therefore reads
+//! `info[scalars_count + i]`. The dynamic (shape/stride) section is empty
+//! because no buffer carries extended metadata in this kernel.
+//!
+//! `convert_function_type` in mir-lower lowers each `MirPtrType` to a single
+//! `.param .u64` and each scalar integer to a by-value `.param`, so the PTX
+//! entry's parameters are the buffer base addresses, the scalar lengths, then
+//! the info-buffer base address, in this order.
 
-use cubecl_core::ir::{ElemType, FloatKind};
+use cubecl_core::ir::{ElemType, FloatKind, StorageType, UIntKind};
 use cubecl_runtime::kernel::KernelDefinition;
 use dialect_mir::types::MirPtrType;
 use pliron::{
-    builtin::types::FP32Type,
+    builtin::types::{FP32Type, IntegerType, Signedness},
     context::Context,
     r#type::TypeHandle,
 };
@@ -37,35 +54,72 @@ pub(crate) fn mir_elem_type(ctx: &mut Context, elem: ElemType) -> Result<TypeHan
     }
 }
 
+/// The dialect-mir type for a kernel `u32` scalar and for metadata length
+/// values: a 32-bit signless integer. This matches the absolute-position index
+/// type, so the bounds-check comparison needs no cast.
+pub(crate) fn u32_mir_type(ctx: &mut Context) -> TypeHandle {
+    IntegerType::get(ctx, 32, Signedness::Signless).into()
+}
+
 /// Build a GLOBAL, mutable pointer to `elem` (the kernel buffer pointer type).
 pub(crate) fn global_ptr_type(ctx: &mut Context, elem: ElemType) -> Result<TypeHandle, String> {
     let pointee = mir_elem_type(ctx, elem)?;
     Ok(MirPtrType::get_global(ctx, pointee, true).into())
 }
 
-/// Kernel-parameter pointer types, one GLOBAL `MirPtrType` per buffer in
-/// declaration order. Rejects kernels carrying scalars or tensor maps, which
-/// are out of M1 spine scope.
+/// The info-buffer pointer type: a GLOBAL, read-only `u32` pointer.
+pub(crate) fn info_ptr_type(ctx: &mut Context) -> TypeHandle {
+    let pointee = u32_mir_type(ctx);
+    MirPtrType::get_global(ctx, pointee, false).into()
+}
+
+/// Total number of scalar parameter slots. Each `ScalarKernelArg { count }`
+/// expands to `count` slots.
+pub(crate) fn scalars_count(kernel: &KernelDefinition) -> usize {
+    kernel.scalars.iter().map(|s| s.count).sum()
+}
+
+/// Whether the kernel carries an info buffer (a trailing GLOBAL `u32` pointer).
+/// Present whenever the kernel has scalar params, matching CubeCL's binding
+/// order. The M1 spine has no scalars and thus no info buffer.
+pub(crate) fn has_info_buffer(kernel: &KernelDefinition) -> bool {
+    scalars_count(kernel) > 0
+}
+
+/// Kernel-parameter types: buffer pointers, then `u32` scalar values, then the
+/// info-buffer pointer (when scalars are present). Rejects tensor maps and
+/// non-`u32` scalars, which are out of M1 scope.
 pub(crate) fn kernel_param_types(
     ctx: &mut Context,
     kernel: &KernelDefinition,
 ) -> Result<Vec<TypeHandle>, String> {
-    if !kernel.scalars.is_empty() {
-        return Err(format!(
-            "unsupported kernel: {} scalar argument(s) (M1 spine has none)",
-            kernel.scalars.len()
-        ));
-    }
     if !kernel.tensor_maps.is_empty() {
         return Err(format!(
             "unsupported kernel: {} tensor-map argument(s) (M1 spine has none)",
             kernel.tensor_maps.len()
         ));
     }
+    for scalar in &kernel.scalars {
+        match scalar.ty {
+            StorageType::Scalar(ElemType::UInt(UIntKind::U32)) => {}
+            other => {
+                return Err(format!(
+                    "unsupported scalar type: {other:?} (M1 supports u32 scalars only)"
+                ));
+            }
+        }
+    }
 
-    let mut params = Vec::with_capacity(kernel.buffers.len());
+    let s_count = scalars_count(kernel);
+    let mut params = Vec::with_capacity(kernel.buffers.len() + s_count + 1);
     for buffer in &kernel.buffers {
         params.push(global_ptr_type(ctx, buffer.ty.elem_type())?);
+    }
+    for _ in 0..s_count {
+        params.push(u32_mir_type(ctx));
+    }
+    if s_count > 0 {
+        params.push(info_ptr_type(ctx));
     }
     Ok(params)
 }

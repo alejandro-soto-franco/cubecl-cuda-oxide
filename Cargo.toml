@@ -1,0 +1,36 @@
+[package]
+name = "cubecl-cuda-oxide"
+version = "0.1.0"
+edition = "2024"
+description = "CubeCL backend that compiles kernels to PTX via cuda-oxide's LLVM-NVPTX pipeline (no nvrtc, no rustc)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# CubeCL, pinned to the exact rev Burn uses.
+cubecl = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
+cubecl-core = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
+cubecl-runtime = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
+cubecl-common = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
+
+# cuda-oxide (local path deps during development; switch to git for publish).
+mir-importer = { path = "../cuda-oxide/crates/mir-importer" }
+dialect-mir = { path = "../cuda-oxide/crates/dialect-mir" }
+dialect-nvvm = { path = "../cuda-oxide/crates/dialect-nvvm" }
+# Same git/rev as cuda-oxide workspace uses, so cargo unifies the pliron build.
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "222dd962a124cba8ec5f119ae6e0ecf202630854" }
+
+# Verbatim cudarc line from the cubecl workspace (cubecl-cuda/Cargo.toml).
+cudarc = { version = "0.19.6", features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "nccl",
+    "fallback-dynamic-loading",
+    "cuda-version-from-build-system",
+    "fallback-latest",
+], default-features = false }
+
+bytemuck = "1"
+
+[dev-dependencies]
+# burn-cubecl + burn-cuda are added in Task 9 for the e2e example.

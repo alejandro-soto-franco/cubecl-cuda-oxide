@@ -5,3 +5,5 @@
 //! no fusion, no autotune.
 
 #![deny(clippy::all)]
+
+pub mod compiler;

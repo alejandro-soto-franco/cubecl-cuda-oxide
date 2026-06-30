@@ -5,12 +5,33 @@ edition = "2024"
 description = "CubeCL backend that compiles kernels to PTX via cuda-oxide's LLVM-NVPTX pipeline (no nvrtc, no rustc)."
 license = "MIT OR Apache-2.0"
 
+[features]
+# Off by default; matches the optional tracing instrumentation in the vendored
+# compute server. Enabling it would require a `tracing` dependency.
+tracing = []
+
+[lints.rust]
+# `cuda_12080` is a custom cfg the upstream cubecl-cuda build script emits from
+# the detected CUDA toolkit version. We vendor the gated branches verbatim; the
+# branch is simply inactive unless that cfg is set.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(cuda_12080)'] }
+
 [dependencies]
-# CubeCL, pinned to the exact rev Burn uses.
+# CubeCL, pinned to the exact rev Burn uses. Feature set matches cubecl-cuda's
+# so the vendored compute server resolves (streams, compilation cache, hashing).
 cubecl = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
-cubecl-core = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
-cubecl-runtime = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
-cubecl-common = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839" }
+cubecl-core = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839", features = [
+    "std",
+] }
+cubecl-runtime = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839", features = [
+    "std",
+    "channel-mutex",
+] }
+cubecl-common = { git = "https://github.com/tracel-ai/cubecl", default-features = false, rev = "1d628d7e8fa6ac27c67195b35736de0b63cc2839", features = [
+    "std",
+    "compilation-cache",
+    "hash",
+] }
 
 # cuda-oxide (local path deps during development; switch to git for publish).
 mir-importer = { path = "../cuda-oxide/crates/mir-importer" }
@@ -31,6 +52,9 @@ cudarc = { version = "0.19.6", features = [
 ], default-features = false }
 
 bytemuck = "1"
+derive-new = { version = "0.7.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
 
 [dev-dependencies]
 # burn-cubecl + burn-cuda are added in Task 9 for the e2e example.

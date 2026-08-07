@@ -49,13 +49,11 @@ use dialect_nvvm::ops::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attributes::{IntegerAttr, StringAttr, TypeAttr},
+        attributes::{IntegerAttr, TypeAttr},
         op_interfaces::{OperandSegmentInterface, SymbolOpInterface},
-        ops::ModuleOp,
         types::{FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    linked_list::ContainsLinkedList,
     op::{Op, OpObj},
     operation::Operation as MirOperation,
     region::Region,
@@ -66,7 +64,7 @@ use pliron::{
 
 use super::abi;
 
-/// Concrete-op-info pair returned by every op's `get_concrete_op_info`.
+/// The pair every op's `get_concrete_op_info` returns.
 type OpInfo = (fn(Ptr<MirOperation>) -> OpObj, TypeId);
 
 /// A lowered CubeCL value: either a single pliron value or a virtual aggregate
@@ -177,7 +175,8 @@ impl Lowering {
     /// ```
     ///
     /// All arithmetic is in the `i32` index domain, matching the f32 element size
-    /// `mul.wide` indexing that follows. Integer math, so the grouping is exact.
+    /// `mul.wide` indexing that follows. Integer arithmetic, so the grouping is
+    /// exact.
     fn absolute_pos(&mut self, ctx: &mut Context) -> Value {
         if let Some(v) = self.abs_pos {
             return v;
@@ -311,31 +310,18 @@ impl Lowering {
     }
 }
 
-/// Lower a `KernelDefinition` into a dialect-mir `ModuleOp`, returning the
-/// module operation pointer ready for `compile_module_to_ptx`.
+/// Lower a `KernelDefinition` into a `MirFuncOp`, appended to `module_block`.
+///
+/// The `gpu_kernel` marker is not set here: the caller marks the entry
+/// through `CodegenModule::mark_kernel_entry` once `edit` returns.
 pub fn lower_kernel(
     ctx: &mut Context,
+    module_block: Ptr<BasicBlock>,
     kernel: &KernelDefinition,
-) -> Result<Ptr<MirOperation>, String> {
+) -> Result<(), String> {
     let param_types = abi::kernel_param_types(ctx, kernel)?;
     let i32_ty: TypeHandle = IntegerType::get(ctx, 32, Signedness::Signless).into();
     let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
-
-    // Module shell.
-    let module = ModuleOp::new(ctx, "kernel_module".try_into().unwrap());
-    let module_op = module.get_operation();
-    let module_region = module_op.deref(ctx).get_region(0);
-    let module_block = {
-        let existing = {
-            let region = module_region.deref(ctx);
-            region.iter(ctx).next()
-        };
-        existing.unwrap_or_else(|| {
-            let block = BasicBlock::new(ctx, None, vec![]);
-            block.insert_at_back(module_region, ctx);
-            block
-        })
-    };
 
     // Function `(params...) -> void`.
     let func_type = FunctionType::get(ctx, param_types.clone(), vec![]);
@@ -351,16 +337,6 @@ pub fn lower_kernel(
         );
         func
     };
-
-    // Mark as a PTX `.visible .entry`: presence of a `gpu_kernel` StringAttr is
-    // all `is_kernel_func` inspects.
-    {
-        let key: pliron::identifier::Identifier = "gpu_kernel".try_into().unwrap();
-        func.get_operation()
-            .deref_mut(ctx)
-            .attributes
-            .set(key, StringAttr::new("true".to_string()));
-    }
 
     // Entry block whose arguments are the kernel params (buffers, scalars, info).
     let entry = BasicBlock::new(ctx, None, param_types);
@@ -411,7 +387,7 @@ pub fn lower_kernel(
     );
 
     func.get_operation().insert_at_back(module_block, ctx);
-    Ok(module_op)
+    Ok(())
 }
 
 /// Lower a single CubeCL instruction, extending the SSA map.

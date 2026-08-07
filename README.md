@@ -1,6 +1,6 @@
 # cubecl-cuda-oxide
 
-A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVlabs/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT: no C++ compiler, no nvrtc, no CUDA SDK headers at build time.
+A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVlabs/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT, needing no C++ compiler, nvrtc, or CUDA SDK headers at build time.
 
 ## Status
 
@@ -20,7 +20,7 @@ Measured on RTX 5060 Laptop, sm_120, ptxas 13.1:
 
 ## How it works
 
-CubeCL's `Compiler` trait hands a `KernelDefinition` (CubeCL IR) and expects a PTX representation. `CudaOxideCompiler` walks the IR into a cuda-oxide `dialect-mir` module and calls `mir_importer::compile_module_to_ptx` for the PTX bytes. The PTX is loaded and launched through `cudarc`, reusing the `cubecl-cuda` server with the nvrtc step removed. `CudaOxide = CubeBackend<CudaOxideRuntime>` is the Burn backend.
+CubeCL's `Compiler` trait hands a `KernelDefinition` (CubeCL IR) and expects a PTX representation. `CudaOxideCompiler` walks the IR into a `dialect-mir` function inside a `cuda_oxide_codegen::experimental::CodegenModule`, marks it as the kernel entry, and compiles it through `Compiler::compile_owned` for the PTX bytes. The PTX is loaded and launched through `cudarc`, reusing the `cubecl-cuda` server with the nvrtc step removed. `CudaOxide = CubeBackend<CudaOxideRuntime>` is the Burn backend.
 
 ## Progress
 
@@ -42,21 +42,18 @@ Next:
 
 ## Build
 
-Requires sibling checkouts (path dependencies in `Cargo.toml`): `cuda-oxide` (branch with `compile_module_to_ptx`) and `burn` at the pinned cubecl revision `1d628d7`, laid out as `../cuda-oxide` and `../burn`.
+`cuda-oxide-codegen`, `dialect-mir` and `dialect-nvvm` come from upstream [NVlabs/cuda-oxide](https://github.com/NVlabs/cuda-oxide) through `cuda_oxide_codegen::experimental`, as path dependencies on a local checkout. NVlabs is merging cuda-oxide into a `cuda-rust` mono-repo, which relocates these crates, so `Cargo.toml` avoids a git rev pin until that lands. `burn` is a path dependency at the pinned cubecl revision `1d628d7`, laid out as `../burn`.
 
-Toolchain is the nightly pinned in `rust-toolchain.toml`; `rustup` selects it automatically.
+All three cuda-oxide crates must come from the same checkout. Mixing them gives two distinct crate instances and a type mismatch at the pliron `Context` boundary, even at identical content. `pliron` itself is pinned to the git rev cuda-oxide's own workspace uses, not a registry version, for the same reason.
 
-Any binary, test, or example that links `cuda-oxide`'s `mir-importer` must declare at its crate root:
+Toolchain is `stable`, pinned in `rust-toolchain.toml`; `rustup` selects it automatically.
 
-```rust
-#![feature(rustc_private)]
-extern crate rustc_driver;
-```
+Nothing here links `mir-importer`, so no crate root declares `#![feature(rustc_private)]` or `extern crate rustc_driver;`, and no toolchain needs to match a specific nightly's `rustc_driver`. `cuda_oxide_codegen::experimental::Compiler::discover` finds `llc`/`opt` on `PATH` (falling back to a versioned name such as `llc-22`), so a system LLVM 21+ install covers it and the `llvm-tools` rustup component is not required.
 
-`compile_module_to_ptx` never hosts `rustc_driver`, so no runtime env knobs are needed. Set the PTX target before running:
+The standalone `Compiler` never hosts `rustc_driver`, so no build-time env knobs are needed. Set the PTX target before running:
 
 ```sh
-export CUDA_OXIDE_TARGET=sm_120   # default is sm_80
+export CUDA_OXIDE_TARGET=sm_120   # default is sm_120
 cargo run --example tensor_add
 ```
 

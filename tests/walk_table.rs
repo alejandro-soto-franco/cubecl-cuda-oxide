@@ -5,13 +5,7 @@
 //! to PTX, and validated: `.visible .entry` present, `.target sm_120`, and
 //! `ptxas -arch=sm_120` accepts the assembly.
 
-// `mir-importer` links the compiler's `rustc_driver` dylib; any binary that
-// links it (this external test) must enable `rustc_private` and force the
-// single dylib copy, else linking fails with "X only shows up once".
-#![feature(rustc_private)]
-
-extern crate rustc_driver;
-
+use cuda_oxide_codegen::experimental::{CodegenModule, CompileOptions, Compiler, Target};
 use cubecl_core::ir::{
     Arithmetic, BinaryOperands, Branch, Builtin, Comparison, ElemType, FloatKind, If, IndexOperands,
     Instruction, Memory, Metadata, Operator, Scope, StorageType, StoreOperands, Type, UIntKind,
@@ -19,8 +13,32 @@ use cubecl_core::ir::{
 };
 use cubecl_runtime::kernel::{KernelArg, KernelDefinition, KernelOptions, ScalarKernelArg};
 use cubecl_runtime::server::CubeDim;
+use pliron::basic_block::BasicBlock;
+use pliron::context::{Context, Ptr};
+use pliron::linked_list::ContainsLinkedList;
+use pliron::op::Op;
 
 use cubecl_cuda_oxide::compiler::walk;
+
+/// The module's single top-level block, created if the module has none.
+/// Mirrors the private helper in `src/compiler/mod.rs`: `mark_kernel_entry`
+/// requires exactly one region and exactly one top-level block, and upstream
+/// provides no accessor for it.
+fn module_block(ctx: &mut Context, module: &impl Op) -> Ptr<BasicBlock> {
+    let module_region = module.get_operation().deref(ctx).get_region(0);
+    let existing = {
+        let region = module_region.deref(ctx);
+        region.iter(ctx).next()
+    };
+    match existing {
+        Some(block) => block,
+        None => {
+            let block = BasicBlock::new(ctx, None, vec![]);
+            block.insert_at_back(module_region, ctx);
+            block
+        }
+    }
+}
 
 fn f32_type() -> Type {
     Type::new(StorageType::Scalar(ElemType::Float(FloatKind::F32)))
@@ -189,22 +207,28 @@ fn kernel(name: &str, buffers: Vec<KernelArg>, scalars: usize, scope: Scope) -> 
 
 /// Lower a kernel and compile to PTX text, propagating lowering errors.
 fn lower_to_ptx(kernel: &KernelDefinition) -> Result<(Vec<u8>, String), String> {
-    let mut ctx = pliron::context::Context::new();
-    mir_importer::translator::register_dialects(&mut ctx);
-    let module_op = walk::lower_kernel(&mut ctx, kernel)?;
-    let ptx = mir_importer::compile_module_to_ptx(
-        &mut ctx,
-        module_op,
-        &mir_importer::PtxConfig::new("sm_120"),
-    )
-    .map_err(|e| format!("compile failed: {e:?}"))?;
+    let mut module = CodegenModule::new("kernel_module").map_err(|e| e.to_string())?;
+    module.edit(|ctx, module_op| {
+        let block = module_block(ctx, module_op);
+        walk::lower_kernel(ctx, block, kernel)
+    })?;
+    module
+        .mark_kernel_entry(&walk::entry_name(kernel))
+        .map_err(|e| e.to_string())?;
+
+    let compiler = Compiler::discover().map_err(|e| e.to_string())?;
+    let options = CompileOptions::new(Target::parse("sm_120").map_err(|e| e.to_string())?);
+    let ptx = compiler
+        .compile_owned(module, &options)
+        .map_err(|e| format!("compile failed: {e:?}"))?
+        .into_ptx();
     let text = String::from_utf8(ptx.clone()).map_err(|e| e.to_string())?;
     Ok((ptx, text))
 }
 
 /// `Metadata::BufferLength`: read the info buffer. The kernel reads `in[len]`
-/// and writes it to `out[pos]` (a genuine cross-buffer copy, so the info-buffer
-/// load survives dead-code elimination).
+/// and writes it to `out[pos]`, a cross-buffer copy, so the info-buffer load
+/// survives dead-code elimination.
 fn build_buffer_length_kernel() -> KernelDefinition {
     let in_buf = f32_buffer(0);
     let out_buf = f32_buffer(1);
@@ -375,7 +399,7 @@ fn build_aggregate_kernel() -> KernelDefinition {
     kernel("aggregate_kernel", vec![a, b, out], 1, scope)
 }
 
-/// A genuinely unsupported op (`Arithmetic::Mul`) to prove fail-loud fires.
+/// An unsupported op (`Arithmetic::Mul`) to prove fail-loud fires.
 fn build_unsupported_kernel() -> KernelDefinition {
     let a = local(0);
     let out = local(1);
@@ -441,17 +465,23 @@ fn unsupported_operation_fails_loud() {
 fn spine_add_lowers_and_validates() {
     let kernel = build_spine_add_kernel();
 
-    let mut ctx = pliron::context::Context::new();
-    mir_importer::translator::register_dialects(&mut ctx);
+    let mut module = CodegenModule::new("kernel_module").expect("module name is valid");
+    module
+        .edit(|ctx, module_op| {
+            let block = module_block(ctx, module_op);
+            walk::lower_kernel(ctx, block, &kernel)
+        })
+        .expect("spine lowers");
+    module
+        .mark_kernel_entry(&walk::entry_name(&kernel))
+        .expect("spine kernel is marked as entry");
 
-    let module_op = walk::lower_kernel(&mut ctx, &kernel).expect("spine lowers");
-
-    let ptx = mir_importer::compile_module_to_ptx(
-        &mut ctx,
-        module_op,
-        &mir_importer::PtxConfig::new("sm_120"),
-    )
-    .expect("module compiles to PTX");
+    let compiler = Compiler::discover().expect("LLVM 21+ llc and opt are installed");
+    let options = CompileOptions::new(Target::parse("sm_120").expect("valid target"));
+    let ptx = compiler
+        .compile_owned(module, &options)
+        .expect("module compiles to PTX")
+        .into_ptx();
     let text = String::from_utf8(ptx.clone()).expect("PTX is utf-8");
 
     assert!(

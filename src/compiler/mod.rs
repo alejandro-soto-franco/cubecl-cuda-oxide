@@ -1,6 +1,6 @@
 //! `CudaOxideCompiler`: a `cubecl_runtime::Compiler` that lowers a CubeCL
 //! `KernelDefinition` to PTX through cuda-oxide's dialect-mir / LLVM-NVPTX
-//! pipeline (`mir_importer::compile_module_to_ptx`), bypassing nvrtc.
+//! pipeline (`cuda_oxide_codegen::experimental`), bypassing nvrtc.
 //!
 //! M1 scope is the irreducible elementwise-add "spine"; see [`walk`].
 
@@ -8,14 +8,26 @@ use core::fmt;
 
 use cubecl_common::backtrace::BackTrace;
 use cubecl_core::ir::{ElemType, StorageType, UIntKind};
+use cuda_oxide_codegen::experimental::{CodegenModule, CompileOptions, Compiler as OxideCompiler, Target};
 use cubecl_runtime::{
     compiler::{CompilationError, Compiler},
     kernel::KernelDefinition,
     server::ExecutionMode,
 };
+use pliron::basic_block::BasicBlock;
+use pliron::context::{Context, Ptr};
+use pliron::linked_list::ContainsLinkedList;
+use pliron::op::Op;
 
 pub mod abi;
 pub mod walk;
+
+/// PTX target architecture, read from `CUDA_OXIDE_TARGET`. Defaults to
+/// `sm_120`: the M1 spine, the parity fixtures, and `spine_add_lowers_and_validates`
+/// all assume this target, and every measured result in the README is against
+/// it. `sm_80` (a plausible-looking "lowest common denominator" default) would
+/// silently retarget every one of those.
+const DEFAULT_TARGET: &str = "sm_120";
 
 /// PTX produced by the cuda-oxide pipeline. The CubeCL `Compiler::Representation`
 /// bound is `Display`, which renders the PTX text.
@@ -64,26 +76,74 @@ impl Compiler for CudaOxideCompiler {
             });
         }
 
-        let mut ctx = pliron::context::Context::new();
-        mir_importer::translator::register_dialects(&mut ctx);
+        let entry_name = walk::entry_name(&kernel);
 
-        let module_op =
-            walk::lower_kernel(&mut ctx, &kernel).map_err(|reason| CompilationError::Generic {
-                reason,
-                backtrace: BackTrace::capture(),
-            })?;
-
-        let cfg = mir_importer::PtxConfig::new("sm_120");
-        let ptx = mir_importer::compile_module_to_ptx(&mut ctx, module_op, &cfg).map_err(|e| {
+        let mut module = CodegenModule::new("kernel_module").map_err(|error| {
             CompilationError::Generic {
-                reason: format!("cuda-oxide ptx pipeline failed: {e}"),
+                reason: format!(
+                    "cuda-oxide module creation failed ({:?}): {error}",
+                    error.stage()
+                ),
                 backtrace: BackTrace::capture(),
             }
         })?;
 
+        module
+            .edit(|ctx, module_op| {
+                let block = module_block(ctx, module_op);
+                walk::lower_kernel(ctx, block, &kernel)
+            })
+            .map_err(|reason| CompilationError::Generic {
+                reason,
+                backtrace: BackTrace::capture(),
+            })?;
+
+        module
+            .mark_kernel_entry(&entry_name)
+            .map_err(|error| CompilationError::Generic {
+                reason: format!(
+                    "cuda-oxide kernel-entry marking failed ({:?}): {error}",
+                    error.stage()
+                ),
+                backtrace: BackTrace::capture(),
+            })?;
+
+        // Read the target after a successful lowering, not before: a failed
+        // lowering should report the lowering error, not an unrelated target
+        // parse failure.
+        let target_text =
+            std::env::var("CUDA_OXIDE_TARGET").unwrap_or_else(|_| DEFAULT_TARGET.to_string());
+        let target = Target::parse(&target_text).map_err(|error| CompilationError::Generic {
+            reason: format!(
+                "invalid CUDA_OXIDE_TARGET ({:?}): {error}",
+                error.stage()
+            ),
+            backtrace: BackTrace::capture(),
+        })?;
+        let options = CompileOptions::new(target);
+
+        let compiler = OxideCompiler::discover().map_err(|error| CompilationError::Generic {
+            reason: format!(
+                "cuda-oxide toolchain discovery failed ({:?}): {error}",
+                error.stage()
+            ),
+            backtrace: BackTrace::capture(),
+        })?;
+
+        let ptx = compiler
+            .compile_owned(module, &options)
+            .map_err(|error| CompilationError::Generic {
+                reason: format!(
+                    "cuda-oxide ptx pipeline failed ({:?}): {error}",
+                    error.stage()
+                ),
+                backtrace: BackTrace::capture(),
+            })?
+            .into_ptx();
+
         Ok(PtxRepresentation {
             ptx,
-            entry_name: walk::entry_name(&kernel),
+            entry_name,
             cube_dim: (kernel.cube_dim.x, kernel.cube_dim.y, kernel.cube_dim.z),
         })
     }
@@ -94,6 +154,27 @@ impl Compiler for CudaOxideCompiler {
 
     fn extension(&self) -> &'static str {
         "ptx"
+    }
+}
+
+/// The module's single top-level block, created if the module has none.
+///
+/// Upstream provides no such accessor; `mark_kernel_entry` requires exactly
+/// one region and exactly one top-level block, so a caller building fresh IR
+/// must set this up itself.
+fn module_block(ctx: &mut Context, module: &impl Op) -> Ptr<BasicBlock> {
+    let module_region = module.get_operation().deref(ctx).get_region(0);
+    let existing = {
+        let region = module_region.deref(ctx);
+        region.iter(ctx).next()
+    };
+    match existing {
+        Some(block) => block,
+        None => {
+            let block = BasicBlock::new(ctx, None, vec![]);
+            block.insert_at_back(module_region, ctx);
+            block
+        }
     }
 }
 

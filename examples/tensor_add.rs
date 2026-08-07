@@ -1,5 +1,5 @@
-//! M1 acceptance milestone: run a Burn elementwise `add` end to end on the GPU
-//! (RTX 5060 Laptop, sm_120) through the pure-Rust cuda-oxide PTX path.
+//! Run a Burn elementwise `add` end to end on the GPU (RTX 5060 Laptop,
+//! sm_120) through the pure-Rust cuda-oxide PTX path.
 //!
 //! Run with:
 //! ```bash
@@ -10,25 +10,16 @@
 //!
 //! ## Why the `Backend` trait and not `Tensor::<CudaOxide, 1>`
 //!
-//! The task brief's `Tensor::<CudaOxide, 1>::from_data(..)` reflects the older
-//! burn API. This burn rev changed `Tensor` to `Tensor<const D: usize, K>` with
-//! no backend type parameter: the backend is chosen at runtime by `burn-dispatch`
-//! through a CLOSED, compile-time `backend_list!` (Cpu/Cuda/Metal/Wgpu/...). An
-//! out-of-tree backend like `CudaOxide` cannot be added to that list without
-//! forking burn. The faithful integration is therefore to drive the
-//! `burn_backend::Backend` trait directly on the concrete `CudaOxide` type:
-//! `float_from_data` -> `float_add` -> `float_into_data`. That is exactly the
-//! op path `Tensor::add` would have lowered to, executed through cuda-oxide PTX.
+//! `Tensor::<CudaOxide, 1>::from_data(..)` belongs to an older burn API. This
+//! burn rev changed `Tensor` to `Tensor<const D: usize, K>` with no backend
+//! type parameter: the backend is chosen at runtime by `burn-dispatch` through
+//! a closed, compile-time `backend_list!` (Cpu/Cuda/Metal/Wgpu/...). An
+//! out-of-tree backend such as `CudaOxide` cannot join that list without
+//! forking burn. The faithful integration therefore drives the
+//! `burn_backend::Backend` trait directly on the `CudaOxide` type itself:
+//! `float_from_data` -> `float_add` -> `float_into_data`. That is the op path
+//! `Tensor::add` would have lowered to, executed through cuda-oxide PTX.
 //!
-//! ## R6
-//!
-//! This final binary links `mir-importer` transitively through `CudaOxide`, so
-//! its crate root must enable `rustc_private` and pull in the `rustc_driver`
-//! dylib, exactly like the library crate.
-#![feature(rustc_private)]
-
-extern crate rustc_driver;
-
 use burn_backend::ops::FloatTensorOps;
 use burn_backend::{TensorData, read_sync};
 use cubecl_cuda_oxide::{CudaOxide, CudaOxideDevice};

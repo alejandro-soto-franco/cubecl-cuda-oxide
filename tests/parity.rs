@@ -1,29 +1,19 @@
-//! M1 numerical parity: prove `CudaOxide`'s elementwise `add` matches the stock
+//! Numerical parity: prove `CudaOxide`'s elementwise `add` matches the stock
 //! nvrtc backend (`burn_cuda::Cuda`) bit for bit, against a checked-in reference.
 //!
 //! Both backends are plain `CubeBackend<R>` (no fusion/autotune), so the only
 //! difference exercised is the PTX producer: cuda-oxide's LLVM-NVPTX pipeline
 //! versus nvrtc. The op surface is the same `kernel_binop<f32, Const<1>, AddOp>`.
 //!
-//! ## fp-contract decision (R4)
+//! ## fp-contract
 //!
 //! Plain elementwise `add` lowers to a single `add.f32`; there is no
 //! `fmul`+`fadd` pair for the backend to contract into an `fma`. fp-contract
 //! (`-fp-contract=fast`) therefore cannot change the result, so cuda-oxide and
-//! nvrtc are BIT-EXACT here and the test asserts exact equality (no tolerance).
-//! `CUDA_OXIDE_NO_FMA` is irrelevant for this kernel and is not set. (For kernels
-//! that do contain a multiply-add, R4 would require `CUDA_OXIDE_NO_FMA=1` or a
-//! `1e-6` tolerance; that is out of M1 scope.)
+//! nvrtc are bit-exact here and the test asserts exact equality (no tolerance).
+//! A kernel that does contain a multiply-add needs contraction disabled or a
+//! `1e-6` tolerance before it can be compared this way.
 //!
-//! ## R6
-//!
-//! This test binary links `mir-importer` transitively through `CudaOxide`, so
-//! the crate root enables `rustc_private` and pulls in the `rustc_driver` dylib.
-//! The nvrtc baseline does not need it, but the shared binary does.
-#![feature(rustc_private)]
-
-extern crate rustc_driver;
-
 use burn_backend::{Backend, TensorData, read_sync};
 use cubecl_cuda_oxide::CudaOxide;
 

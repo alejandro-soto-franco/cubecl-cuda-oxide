@@ -2,13 +2,12 @@
 //!
 //! The file splits into two halves:
 //!
-//! 1. [`DeviceService`] impl for [`CudaOxideServer`] – device init, property
-//!    probing, memory config.  Written in Task 7.
+//! 1. [`DeviceService`] impl for [`CudaOxideServer`]: device init, property
+//!    probing, memory config.
 //!
 //! 2. [`cubecl_core::Runtime`] impl for [`CudaOxideRuntime`] and the
 //!    [`burn_cubecl::CubeRuntime`] sub-trait impl that lets
-//!    `CubeBackend<CudaOxideRuntime>` satisfy Burn's backend bounds.  Added
-//!    in Task 8.
+//!    `CubeBackend<CudaOxideRuntime>` satisfy Burn's backend bounds.
 //!
 //! This is the cuda-oxide analogue of `cubecl-cuda`'s `runtime.rs`, reduced to
 //! the pieces required to satisfy the `ComputeServer` supertrait
@@ -17,8 +16,8 @@
 //! produced by [`crate::compiler::CudaOxideCompiler`], so device init only has to
 //! build the CUDA context and the device-property table.
 //!
-//! M1 scope registers the standard scalar numeric types; richer feature probing
-//! (tensor cores, TMA, fast-math variants) is left for later milestones.
+//! Current scope registers the standard scalar numeric types; richer feature
+//! probing (tensor cores, TMA, `--use_fast_math` variants) is left for later.
 
 use crate::compute::CudaOxideServer;
 use crate::compute::context::CudaOxideContext;
@@ -27,7 +26,7 @@ use cubecl_common::{
     device::{Device, DeviceId, DeviceService, ServerUtilitiesHandle},
     profile::TimingMethod,
 };
-// Additional imports needed by the Runtime / CubeRuntime impls (Task 8).
+// Additional imports needed by the Runtime / CubeRuntime impls.
 use cubecl_core::{Runtime, client::ComputeClient};
 use cubecl_core::ir::TargetProperties;
 use cubecl_core::zspace::{Shape, Strides, striding::has_pitched_row_major_strides};
@@ -228,9 +227,7 @@ fn register_supported_types(props: &mut DeviceProperties) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task 8: Runtime trait impl + Burn CubeRuntime sub-trait
-// ---------------------------------------------------------------------------
+// Runtime trait impl + Burn CubeRuntime sub-trait.
 
 /// Re-export for callers that want the device type under the oxide name.
 pub use crate::device::CudaDevice as CudaOxideDevice;
@@ -238,8 +235,7 @@ pub use crate::device::CudaDevice as CudaOxideDevice;
 /// Zero-sized marker type identifying the cuda-oxide `Runtime`.
 ///
 /// Plugs into `CubeBackend<CudaOxideRuntime>` to satisfy Burn's backend
-/// bounds.  At this milestone the backend emits a `pub type CudaOxide` alias
-/// but no Burn ops are registered yet (that is Task 9).
+/// bounds, which is what makes `pub type CudaOxide` a usable Burn backend.
 #[derive(Debug, Clone, Default)]
 pub struct CudaOxideRuntime;
 

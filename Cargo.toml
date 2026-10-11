@@ -33,23 +33,20 @@ cubecl-common = { git = "https://github.com/tracel-ai/cubecl", default-features 
     "hash",
 ] }
 
-# cuda-oxide, from upstream NVlabs/cuda-oxide main. All three crates must come
-# from the same checkout: mixing them gives two distinct crate instances and a
-# type mismatch at the pliron Context boundary, even at identical content/rev.
-# `pliron` is pinned to the same rev cuda-oxide itself uses (not a registry
-# version), since pliron types cross the `cuda_oxide_codegen::experimental` API
-# boundary and a registry copy would resolve as a distinct, incompatible crate
-# at the same version number.
+# cuda-oxide, from NVIDIA/cuda-rust, where the compiler lives under `cuda-oxide/`.
+# All three crates must come from the same checkout: mixing them gives two
+# distinct crate instances and a type mismatch at the pliron Context boundary,
+# even at identical content/rev. `pliron` is pinned to the same rev cuda-oxide
+# itself uses (not a registry version), since pliron types cross the
+# `cuda_oxide_codegen::experimental` API boundary and a registry copy would
+# resolve as a distinct, incompatible crate at the same version number.
 #
-# Deliberately path deps rather than a `git` + `rev` pin. NVlabs is merging
-# cuda-oxide into a `cuda-rust` mono-repo alongside cutile-rs, which relocates
-# these crates and may archive this repository, so a rev pin here would age
-# badly. Switch to the git form once that lands and the new paths are known.
-# The equivalent pin, verified green, is rev 2db97134 of NVlabs/cuda-oxide.
-cuda-oxide-codegen = { path = "/home/alejandrosotofranco/cuda-oxide/crates/cuda-oxide-codegen" }
-dialect-mir = { path = "/home/alejandrosotofranco/cuda-oxide/crates/dialect-mir" }
-dialect-nvvm = { path = "/home/alejandrosotofranco/cuda-oxide/crates/dialect-nvvm" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "0d3f25df6d0e76b6c6f23d6e17172142b50c715c" }
+# Pinned at bad4d055, the last rev before the move into the mono-repo layout.
+# Moving the pin past it means following the crates to `cuda-oxide/crates/`.
+cuda-oxide-codegen = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
+dialect-mir = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
+dialect-nvvm = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "823d9d8087652cd3f2d006a7ea534df921a23564" }
 
 # Verbatim cudarc line from the cubecl workspace (cubecl-cuda/Cargo.toml).
 cudarc = { version = "0.19.6", features = [

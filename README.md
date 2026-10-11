@@ -1,6 +1,6 @@
 # cubecl-cuda-oxide
 
-A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVlabs/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT, needing no C++ compiler, nvrtc, or CUDA SDK headers at build time.
+A [CubeCL](https://github.com/tracel-ai/cubecl) backend that compiles kernels to PTX through the [cuda-oxide](https://github.com/NVIDIA/cuda-rust/tree/main/cuda-oxide) LLVM-NVPTX pipeline instead of nvrtc. Pure-Rust GPU JIT, needing no C++ compiler, nvrtc, or CUDA SDK headers at build time.
 
 ## Status
 
@@ -42,7 +42,7 @@ Next:
 
 ## Build
 
-`cuda-oxide-codegen`, `dialect-mir` and `dialect-nvvm` come from upstream [NVlabs/cuda-oxide](https://github.com/NVlabs/cuda-oxide) through `cuda_oxide_codegen::experimental`, as path dependencies on a local checkout. NVlabs is merging cuda-oxide into a `cuda-rust` mono-repo, which relocates these crates, so `Cargo.toml` avoids a git rev pin until that lands. `burn` is a path dependency at the pinned cubecl revision `1d628d7`, laid out as `../burn`.
+`cuda-oxide-codegen`, `dialect-mir` and `dialect-nvvm` come from upstream [NVIDIA/cuda-rust](https://github.com/NVIDIA/cuda-rust/tree/main/cuda-oxide) through `cuda_oxide_codegen::experimental`, pinned at rev `bad4d05`, the last before the move into the mono-repo layout. `burn` is a path dependency at the pinned cubecl revision `1d628d7`, laid out as `../burn`.
 
 All three cuda-oxide crates must come from the same checkout. Mixing them gives two distinct crate instances and a type mismatch at the pliron `Context` boundary, even at identical content. `pliron` itself is pinned to the git rev cuda-oxide's own workspace uses, not a registry version, for the same reason.
 

@@ -36,17 +36,16 @@ cubecl-common = { git = "https://github.com/tracel-ai/cubecl", default-features 
 # cuda-oxide, from NVIDIA/cuda-rust, where the compiler lives under `cuda-oxide/`.
 # All three crates must come from the same checkout: mixing them gives two
 # distinct crate instances and a type mismatch at the pliron Context boundary,
-# even at identical content/rev. `pliron` is pinned to the same rev cuda-oxide
-# itself uses (not a registry version), since pliron types cross the
-# `cuda_oxide_codegen::experimental` API boundary and a registry copy would
-# resolve as a distinct, incompatible crate at the same version number.
+# even at identical content/rev. `pliron` is pinned to the exact release
+# cuda-oxide itself uses, since pliron types cross the
+# `cuda_oxide_codegen::experimental` API boundary and a second copy would
+# resolve as a distinct, incompatible crate.
 #
-# Pinned at bad4d055, the last rev before the move into the mono-repo layout.
-# Moving the pin past it means following the crates to `cuda-oxide/crates/`.
-cuda-oxide-codegen = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
-dialect-mir = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
-dialect-nvvm = { git = "https://github.com/NVIDIA/cuda-rust", rev = "bad4d05559c188cdcfb3469d1497c5b9c3c303fa" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "823d9d8087652cd3f2d006a7ea534df921a23564" }
+# Pinned at 9df9e7ce, the first rev with cuda-oxide on stable Rust 1.99.1.
+cuda-oxide-codegen = { git = "https://github.com/NVIDIA/cuda-rust", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+dialect-mir = { git = "https://github.com/NVIDIA/cuda-rust", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+dialect-nvvm = { git = "https://github.com/NVIDIA/cuda-rust", rev = "9df9e7cef561e03a066230b3bb433b3d8285da81" }
+pliron = "=0.20.0"
 
 # Verbatim cudarc line from the cubecl workspace (cubecl-cuda/Cargo.toml).
 cudarc = { version = "0.19.6", features = [
